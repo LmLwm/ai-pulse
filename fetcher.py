@@ -11,6 +11,11 @@ import urllib.request
 import urllib.error
 from xml.etree import ElementTree as ET
 
+# Force IPv4 to avoid connectivity issues on some hosts
+_orig_gai = socket.getaddrinfo
+def _ipv4_gai(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_gai(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _ipv4_gai
 socket.setdefaulttimeout(15)
 CTX = ssl.create_default_context()
 
@@ -51,8 +56,15 @@ def fetch_hn(limit=20):
     return [r for r in results if r]
 
 def fetch_reddit(sub, limit=25):
-    data = _json(f"https://old.reddit.com/r/{sub}/hot.json?limit={limit}&raw_json=1",
-        headers={"User-Agent": "AI-Pulse/2.0 (github-pages; python)"})
+    for endpoint in [f"https://www.reddit.com/r/{sub}/hot.json?limit={limit}&raw_json=1",
+                     f"https://old.reddit.com/r/{sub}/hot.json?limit={limit}&raw_json=1"]:
+        try:
+            data = _json(endpoint, headers={"User-Agent": "AI-Pulse/2.0 (github-pages; python)"})
+            break
+        except Exception:
+            continue
+    else:
+        raise Exception("All Reddit endpoints failed")
     return [{"title": p["data"]["title"], "url": p["data"].get("url",""), "score": p["data"].get("score",0),
         "comments": p["data"].get("num_comments",0), "source": f"r/{sub}",
         "link": f"https://reddit.com{p['data'].get('permalink','')}"}
@@ -75,11 +87,17 @@ def fetch_arxiv(query, limit=15):
 def fetch_github(limit=20):
     raw = _get("https://github.com/trending?since=daily", timeout=15).decode("utf-8", errors="replace")
     items = []
-    for m in re.finditer(r'<h2 class="h3[^"]*">\s*<a href="(/[^"]+)"', raw):
+    for m in re.finditer(r'<h2 class="h3[^"]*">\s*<a[^>]*href="(/[^"]+)"', raw):
         path = m.group(1).strip()
-        desc_m = re.search(r'<p class="[^"]*col-9[^"]*">([^<]+)</p>', raw[m.end():m.end()+500])
+        if "/sponsors" in path or path.count("/") != 2:
+            continue
+        after = raw[m.end():m.end()+800]
+        desc_m = re.search(r'<p class="[^"]*col-9[^"]*">([^<]+)</p>', after)
+        if not desc_m:
+            desc_m = re.search(r'<p class="[^"]*">([^<]{10,})</p>', after)
+        desc = desc_m.group(1).strip() if desc_m else ""
         items.append({"title": path.lstrip("/"), "url": f"https://github.com{path}",
-            "summary": desc_m.group(1).strip() if desc_m else "", "source": "GitHub Trending", "link": f"https://github.com{path}"})
+            "summary": desc, "source": "GitHub Trending", "link": f"https://github.com{path}"})
         if len(items) >= limit: break
     return items
 
