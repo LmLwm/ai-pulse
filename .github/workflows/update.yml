@@ -2,8 +2,8 @@ name: Update AI Pulse
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *'   # Every 30 minutes
+  workflow_dispatch:           # Manual trigger
 
 permissions:
   contents: write
@@ -19,6 +19,10 @@ jobs:
           python-version: '3.x'
 
       - name: Generate snapshot
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python generate.py
 
       - name: Commit and push
