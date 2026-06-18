@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """AI Pulse — data fetcher for GitHub Actions. Stdlib only."""
 
+import base64
 import json
+import os
 import re
 import socket
 import ssl
@@ -30,15 +32,24 @@ def _get(url, timeout=12, headers=None):
 def _json(url, **kw):
     return json.loads(_get(url, **kw))
 
-def _safe(fn, name, retries=1):
+def _err_detail(e):
+    """把异常转成对用户有用的简短原因，而不是笼统的 'Exception'。"""
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {e.code}"
+    if isinstance(e, urllib.error.URLError):
+        return f"网络错误({e.reason})" if e.reason else "网络错误"
+    return type(e).__name__ or "未知错误"
+
+def _safe(fn, name, retries=2):
+    last = None
     for i in range(retries + 1):
         try:
             return fn()
         except Exception as e:
+            last = e
             if i < retries:
-                time.sleep(1)
-            else:
-                return [{"title": f"⚠ {name} 加载失败: {type(e).__name__}", "source": name, "url": "#", "link": "#"}]
+                time.sleep(1.5 * (i + 1))
+    return [{"title": f"⚠ {name} 加载失败: {_err_detail(last)}", "source": name, "url": "#", "link": "#"}]
 
 def fetch_hn(limit=20):
     ids = _json("https://hacker-news.firebaseio.com/v0/topstories.json")[:limit]
@@ -55,20 +66,65 @@ def fetch_hn(limit=20):
     for t in ts: t.join(10)
     return [r for r in results if r]
 
+_REDDIT_UA = "github-actions:ai-pulse-dashboard:v2.1 (by /u/ai_pulse_bot)"
+_reddit_token_cache = {"token": None, "exp": 0}
+
+def _reddit_token():
+    """通过官方 OAuth client_credentials 方式换取 token。
+    需要环境变量 REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET，未配置则返回 None
+    （调用方会自动回退到匿名接口）。已认证的请求不受 Reddit 对数据中心 IP
+    的匿名流量限制，是最稳定的方案。"""
+    cid = os.environ.get("REDDIT_CLIENT_ID", "").strip()
+    secret = os.environ.get("REDDIT_CLIENT_SECRET", "").strip()
+    if not cid or not secret:
+        return None
+    now = time.time()
+    if _reddit_token_cache["token"] and now < _reddit_token_cache["exp"]:
+        return _reddit_token_cache["token"]
+    auth = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+    req = urllib.request.Request(
+        "https://www.reddit.com/api/v1/access_token",
+        data=b"grant_type=client_credentials",
+        headers={"Authorization": f"Basic {auth}", "User-Agent": _REDDIT_UA,
+                 "Content-Type": "application/x-www-form-urlencoded"},
+        method="POST")
+    with urllib.request.urlopen(req, timeout=8, context=CTX) as r:
+        tok = json.loads(r.read())
+    token = tok.get("access_token")
+    if token:
+        _reddit_token_cache["token"] = token
+        _reddit_token_cache["exp"] = now + tok.get("expires_in", 3600) - 60
+    return token
+
 def fetch_reddit(sub, limit=25):
-    for endpoint in [f"https://www.reddit.com/r/{sub}/hot.json?limit={limit}&raw_json=1",
-                     f"https://old.reddit.com/r/{sub}/hot.json?limit={limit}&raw_json=1"]:
+    token = None
+    try:
+        token = _reddit_token()
+    except Exception as e:
+        print(f"   [reddit] OAuth token 获取失败，回退匿名接口: {_err_detail(e)}")
+    attempts = []
+    if token:
+        attempts.append((f"https://oauth.reddit.com/r/{sub}/hot?limit={limit}&raw_json=1",
+                          {"Authorization": f"Bearer {token}", "User-Agent": _REDDIT_UA}))
+    # 匿名接口作为后备：GitHub Actions 等数据中心 IP 经常被 Reddit 限制/屏蔽，
+    # 配置 REDDIT_CLIENT_ID/SECRET 后会优先走上面的认证接口，更稳定。
+    attempts += [
+        (f"https://www.reddit.com/r/{sub}/hot.json?limit={limit}&raw_json=1", {"User-Agent": _REDDIT_UA}),
+        (f"https://old.reddit.com/r/{sub}/hot.json?limit={limit}&raw_json=1", {"User-Agent": _REDDIT_UA}),
+    ]
+    last_err = Exception("All Reddit endpoints failed")
+    for url, headers in attempts:
         try:
-            data = _json(endpoint, headers={"User-Agent": "AI-Pulse/2.0 (github-pages; python)"})
-            break
-        except Exception:
+            data = _json(url, headers=headers, timeout=10)
+            return [{"title": p["data"]["title"], "url": p["data"].get("url",""), "score": p["data"].get("score",0),
+                "comments": p["data"].get("num_comments",0), "source": f"r/{sub}",
+                "link": f"https://reddit.com{p['data'].get('permalink','')}"}
+                for p in data.get("data",{}).get("children",[]) if not p["data"].get("stickied")]
+        except Exception as e:
+            print(f"   [reddit] {url.split('?')[0]} -> {_err_detail(e)}")
+            last_err = e
             continue
-    else:
-        raise Exception("All Reddit endpoints failed")
-    return [{"title": p["data"]["title"], "url": p["data"].get("url",""), "score": p["data"].get("score",0),
-        "comments": p["data"].get("num_comments",0), "source": f"r/{sub}",
-        "link": f"https://reddit.com{p['data'].get('permalink','')}"}
-        for p in data.get("data",{}).get("children",[]) if not p["data"].get("stickied")]
+    raise last_err
 
 def fetch_arxiv(query, limit=15):
     raw = _get(f"https://export.arxiv.org/api/query?search_query={query}&sortBy=submittedDate&sortOrder=descending&max_results={limit}", timeout=15).decode("utf-8", errors="replace")
@@ -102,7 +158,12 @@ def fetch_github(limit=20):
     return items
 
 def fetch_hf(limit=15):
-    data = _json(f"https://huggingface.co/api/models?sort=trending&direction=-1&limit={limit}")
+    headers = {"Accept": "application/json"}
+    tok = os.environ.get("HF_TOKEN", "").strip()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    data = _json(f"https://huggingface.co/api/models?sort=trending&direction=-1&limit={limit}",
+                 timeout=15, headers=headers)
     return [{"title": m.get("id",""), "url": f"https://huggingface.co/{m.get('id','')}",
         "summary": f"👍 {m.get('likes',0):,} · ⬇ {m.get('downloads',0):,}", "source": "HuggingFace",
         "link": f"https://huggingface.co/{m.get('id','')}"} for m in data]
@@ -129,8 +190,8 @@ def fetch_36kr(limit=15):
 
 SOURCES = [
     ("Hacker News",     lambda: _safe(fetch_hn, "Hacker News")),
-    ("r/MachineLearning", lambda: _safe(lambda: fetch_reddit("MachineLearning"), "r/MachineLearning")),
-    ("r/LocalLLaMA",    lambda: _safe(lambda: fetch_reddit("LocalLLaMA"), "r/LocalLLaMA")),
+    ("r/MachineLearning", lambda: _safe(lambda: fetch_reddit("MachineLearning"), "r/MachineLearning", retries=0)),
+    ("r/LocalLLaMA",    lambda: _safe(lambda: fetch_reddit("LocalLLaMA"), "r/LocalLLaMA", retries=0)),
     ("arXiv cs.AI",     lambda: _safe(lambda: fetch_arxiv("cat:cs.AI"), "arXiv cs.AI")),
     ("arXiv cs.CL",     lambda: _safe(lambda: fetch_arxiv("cat:cs.CL"), "arXiv cs.CL")),
     ("GitHub Trending", lambda: _safe(fetch_github, "GitHub Trending")),
@@ -152,5 +213,5 @@ def fetch_all():
             if len(results) >= total: done.set()
     for name, fn in SOURCES:
         threading.Thread(target=_run, args=(name, fn), daemon=True).start()
-    done.wait(timeout=60)
+    done.wait(timeout=75)
     return results
