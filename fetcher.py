@@ -162,11 +162,22 @@ def fetch_hf(limit=15):
     tok = os.environ.get("HF_TOKEN", "").strip()
     if tok:
         headers["Authorization"] = f"Bearer {tok}"
-    data = _json(f"https://huggingface.co/api/models?sort=trending&direction=-1&limit={limit}",
-                 timeout=15, headers=headers)
-    return [{"title": m.get("id",""), "url": f"https://huggingface.co/{m.get('id','')}",
-        "summary": f"👍 {m.get('likes',0):,} · ⬇ {m.get('downloads',0):,}", "source": "HuggingFace",
-        "link": f"https://huggingface.co/{m.get('id','')}"} for m in data]
+    # 注意：sort=trending 不是 /api/models 认可的合法字段（那是网页内部接口才用的值），
+    # 官方 API 里"趋势"对应的真实字段名是 trendingScore，错传 trending 会被服务端拒绝(HTTP 400)。
+    # 这里加一个保险：万一字段名以后又变了，自动退到按下载量排序，而不是直接失败。
+    last_err = None
+    for sort_key in ("trendingScore", "downloads"):
+        try:
+            data = _json(f"https://huggingface.co/api/models?sort={sort_key}&direction=-1&limit={limit}",
+                         timeout=15, headers=headers)
+            return [{"title": m.get("id",""), "url": f"https://huggingface.co/{m.get('id','')}",
+                "summary": f"👍 {m.get('likes',0):,} · ⬇ {m.get('downloads',0):,}", "source": "HuggingFace",
+                "link": f"https://huggingface.co/{m.get('id','')}"} for m in data]
+        except Exception as e:
+            print(f"   [hf] sort={sort_key} -> {_err_detail(e)}")
+            last_err = e
+            continue
+    raise last_err
 
 def fetch_lobsters(limit=15):
     data = _json("https://lobste.rs/hottest.json")
@@ -195,7 +206,7 @@ SOURCES = [
     ("arXiv cs.AI",     lambda: _safe(lambda: fetch_arxiv("cat:cs.AI"), "arXiv cs.AI")),
     ("arXiv cs.CL",     lambda: _safe(lambda: fetch_arxiv("cat:cs.CL"), "arXiv cs.CL")),
     ("GitHub Trending", lambda: _safe(fetch_github, "GitHub Trending")),
-    ("HuggingFace",     lambda: _safe(fetch_hf, "HuggingFace")),
+    ("HuggingFace",     lambda: _safe(fetch_hf, "HuggingFace", retries=0)),
     ("Lobsters",        lambda: _safe(fetch_lobsters, "Lobsters")),
     ("36氪",            lambda: _safe(fetch_36kr, "36氪")),
 ]
