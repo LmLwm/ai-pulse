@@ -7,19 +7,52 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fetcher import fetch_all
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_good.json")
 
 ICONS = {"Hacker News":"🟠","r/MachineLearning":"🤖","r/LocalLLaMA":"🦙","arXiv cs.AI":"📄",
     "arXiv cs.CL":"📄","GitHub Trending":"⭐","HuggingFace":"🤗","Lobsters":"🦞","36氪":"🇨🇳"}
 
+def _load_cache():
+    try:
+        with open(CACHE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_cache(cache):
+    try:
+        with open(CACHE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"   ⚠ 缓存写入失败（不影响本次发布): {e}")
+
 def main():
     print("📡 Fetching data...")
-    data = fetch_all()
+    fresh = fetch_all()
+    now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+
+    cache = _load_cache()
+    data = {}
+    stale_since = {}  # name -> 上次成功抓取的时间，本次是回退用的旧数据
+    fresh_count = 0
+    for name, items in fresh.items():
+        ok = bool(items) and "加载失败" not in items[0].get("title", "")
+        if ok:
+            fresh_count += 1
+            data[name] = items
+            cache[name] = {"items": items, "ts": now}
+        elif name in cache and cache[name].get("items"):
+            data[name] = cache[name]["items"]
+            stale_since[name] = cache[name].get("ts", "?")
+        else:
+            data[name] = items  # 没有任何旧数据可用，如实显示失败卡片
+    _save_cache(cache)
+
     total = sum(len(v) for v in data.values())
-    active = sum(1 for v in data.values() if v and "加载失败" not in v[0].get("title",""))
-    print(f"   {active}/{len(data)} sources online, {total} items")
+    active = fresh_count
+    print(f"   {active}/{len(data)} sources fresh, {len(stale_since)} using cached fallback, {total} items")
 
     data_js = json.dumps(data, ensure_ascii=False)
-    now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
 
     # Build nav tabs
     nav = '<span class="nt on" data-f="all">📋 全部</span>'
@@ -50,8 +83,13 @@ def main():
     for name, items in data.items():
         icon = ICONS.get(name, "📰")
         cnt = len(items)
-        failed = any("加载失败" in it.get("title","") for it in items) if items else True
-        dot = '<span class="sf" title="离线"></span>' if failed else '<span class="so" title="在线"></span>'
+        if name in stale_since:
+            dot = f'<span class="sst" title="本次抓取失败，下方为 {h.escape(stale_since[name])} 最后一次成功抓到的数据"></span>'
+            stale_tag = f' <span class="stg">缓存于 {h.escape(stale_since[name])}</span>'
+        else:
+            failed = any("加载失败" in it.get("title","") for it in items) if items else True
+            dot = '<span class="sf" title="离线"></span>' if failed else '<span class="so" title="在线"></span>'
+            stale_tag = ""
         cards = ""
         for it in items[:25]:
             t = h.escape(it.get("title",""))
@@ -66,7 +104,7 @@ def main():
             if it.get("tags"): meta.append(f'<span class="tg">🏷 {h.escape(it["tags"])}</span>')
             summary_html = f'<p class="sm">{s}</p>' if s else ""
             cards += f'<a href="{u}" target="_blank" rel="noopener" class="{cls}"><div class="ct">{t}</div>{summary_html}<div class="cm2">{" ".join(meta)}</div></a>'
-        sections += f'<section class="ss" data-n="{h.escape(name)}"><h2 class="st">{icon} {h.escape(name)} <span class="cn">({cnt})</span> {dot}</h2><div class="cd">{cards}</div></section>'
+        sections += f'<section class="ss" data-n="{h.escape(name)}"><h2 class="st">{icon} {h.escape(name)} <span class="cn">({cnt})</span>{stale_tag} {dot}</h2><div class="cd">{cards}</div></section>'
 
     page = f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -98,8 +136,10 @@ main{{max-width:1200px;margin:0 auto;padding:24px 32px 64px}}
 .ss{{margin-bottom:40px}}
 .st{{font-size:18px;font-weight:700;color:var(--t1);margin-bottom:16px;padding-bottom:8px;border-bottom:2px solid var(--bd);display:flex;align-items:center;gap:8px}}
 .cn{{font-size:13px;color:var(--t2);font-weight:400}}
-.so,.sf{{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:auto}}
+.so,.sf,.sst{{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:auto}}
 .so{{background:var(--gn);box-shadow:0 0 6px var(--gn)}}.sf{{background:var(--rd);box-shadow:0 0 6px var(--rd)}}
+.sst{{background:#f0a020;box-shadow:0 0 6px #f0a020}}
+.stg{{font-size:11px;color:#f0a020;font-weight:400}}
 .cd{{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}}
 .c{{display:block;background:var(--s1);border:1px solid var(--bd);border-radius:var(--r);padding:16px 18px;text-decoration:none;color:inherit;transition:all .2s}}
 .c:hover{{background:var(--s2);border-color:var(--a1);transform:translateY(-2px);box-shadow:0 8px 24px rgba(108,92,231,.12)}}
