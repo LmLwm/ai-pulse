@@ -124,6 +124,31 @@ def fetch_reddit(sub, limit=25):
             print(f"   [reddit] {url.split('?')[0]} -> {_err_detail(e)}")
             last_err = e
             continue
+    # 最后一道兜底：RSS。不需要密钥，且是完全不同的接口形态（XML 不是 JSON），
+    # 如果上面的封锁是针对 JSON 接口的，这里有机会绕过去；拿不到评分/评论数也无妨，
+    # 标题和链接能出来就比直接失败强。
+    try:
+        raw = _get(f"https://www.reddit.com/r/{sub}/.rss",
+                   headers={"User-Agent": _REDDIT_UA}, timeout=10).decode("utf-8", errors="replace")
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        root = ET.fromstring(raw)
+        items = []
+        for e in root.findall("a:entry", ns):
+            title = (e.findtext("a:title", "", ns) or "").strip()
+            link_el = e.find("a:link[@rel='alternate']", ns)
+            if link_el is None:
+                link_el = e.find("a:link", ns)
+            link = link_el.get("href", "") if link_el is not None else ""
+            if title and link:
+                items.append({"title": title, "url": link, "source": f"r/{sub}", "link": link})
+            if len(items) >= limit:
+                break
+        if items:
+            return items
+        last_err = Exception("RSS 返回为空")
+    except Exception as e:
+        print(f"   [reddit] RSS -> {_err_detail(e)}")
+        last_err = e
     raise last_err
 
 def fetch_arxiv(query, limit=15):
