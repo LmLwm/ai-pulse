@@ -158,7 +158,7 @@ main{{max-width:1200px;margin:0 auto;padding:24px 32px 64px}}
 <div class="ts">{top_html}</div>
 <nav class="nav" id="nv">{nav}</nav>
 <main id="main">{sections}</main>
-<div class="ft">AI Pulse · 每 30 分钟自动更新 · <a href="https://github.com" style="color:var(--a2)">GitHub Pages</a></div>
+<div class="ft">AI Pulse · 每 2 小时自动更新 · <a href="https://github.com" style="color:var(--a2)">GitHub Pages</a></div>
 <script>
 document.getElementById("nv").addEventListener("click",function(e){{var t=e.target.closest(".nt");if(!t)return;document.querySelectorAll(".nt").forEach(function(x){{x.classList.remove("on")}});t.classList.add("on");var f=t.dataset.f;document.querySelectorAll(".ss").forEach(function(s){{var n=s.dataset.n||"";s.style.display=f==="all"?"":n.indexOf(f)>=0?"":"none"}})}});
 </script>
